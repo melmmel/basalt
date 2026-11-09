@@ -7,6 +7,7 @@ import Basalt.Fuzz.Basic
 import Basalt.Fuzz.Choice
 import Basalt.Fuzz.Record
 import Basalt.PBT.Driver
+import Basalt.IO
 
 /-!
 # Running a property under libFuzzer
@@ -187,12 +188,26 @@ def runOneRandom (counters : IO.Ref (Nat × Nat)) (T : PropM IO Unit) (_ : ByteA
     reportFailure msg #[("runs", s!"{runs} ({discards} discarded)")]
     pure 1
 
+/-- The value of libFuzzer's `-seed=N` flag in `argv`, if given (the last one, as libFuzzer reads
+them). -/
+def seedFlag? (argv : Array String) : Option Nat :=
+  argv.foldl (init := none) fun acc a =>
+    if a.startsWith "-seed=" then ((a.drop 6).toString.toNat?).orElse fun _ => acc else acc
+
 /-- A *random* campaign run inside libFuzzer's loop: every input is drawn at `IO` and libFuzzer's
 buffer is ignored, so nothing guides the search, but libFuzzer still counts the coverage each run
 reaches. This is the control arm of a coverage comparison: the same binary, instrumentation, and
-counters as `go`, with only the source of the choices changed. -/
+counters as `go`, with only the source of the choices changed.
+
+The inputs come from `ioGen`, not from libFuzzer's random generator, so libFuzzer's `-seed=N` does
+not reach them by itself. When `argv` has `-seed=N`, `ioGen` is reseeded with `N` first, so the
+same seed gives the same inputs and the campaign can be repeated, as `fuzz` and `choice` can.
+Without it, `ioGen` keeps its seed from system entropy. -/
 def goRandom (T : PropM IO Unit) (argv : Array String := #[]) : IO Unit := do
   IO.println s!"[basalt] starting random campaign under libFuzzer ({argv.toList})"
+  if let some n := seedFlag? argv then
+    ioGen.set (SplitMix.ofSeed n.toUInt64)
+    IO.println s!"[basalt] random choices seeded with {n}"
   let counters ← IO.mkRef (0, 0)
   goImpl (runOneRandom counters T) argv false 0
 
