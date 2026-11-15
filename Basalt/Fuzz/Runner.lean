@@ -99,12 +99,23 @@ def runOneRandom (counters : IO.Ref (Nat × Nat)) (T : PropM IO Unit) (_ : ByteA
   tally counters (← runProp T) fun msg runs discards =>
     reportFailure msg #[("runs", s!"{runs} ({discards} discarded)")]
 
+/-- The value of libFuzzer's `-seed=N` flag in `argv`, if given (the last one, as libFuzzer reads
+them). The random choices come from a SplitMix generator, not from libFuzzer's own, so libFuzzer's
+`-seed` does not reach them by itself: `goRandom` and `goHybrid` reseed from it, so the same seed
+gives the same campaign. Without it they keep a seed from system entropy. -/
+def seedFlag? (argv : Array String) : Option Nat :=
+  argv.foldl (init := none) fun acc a =>
+    if a.startsWith "-seed=" then ((a.drop 6).toString.toNat?).orElse fun _ => acc else acc
+
 /-- A *random* campaign run inside libFuzzer's loop: every input is drawn at `IO` and libFuzzer's
 buffer is ignored, so nothing guides the search, but the same binary, instrumentation, and counters
 as `go` are in place. This is the control arm of a coverage comparison (`BASALT_COV_OUT`,
 `fuzz-run/README.md`), with only the source of the choices changed. -/
 def goRandom (T : PropM IO Unit) (argv : Array String := #[]) : IO Unit := do
   IO.println s!"[basalt] starting random campaign under libFuzzer ({argv.toList})"
+  if let some n := seedFlag? argv then
+    ioGen.set (SplitMix.ofSeed n.toUInt64)
+    IO.println s!"[basalt] random choices seeded with {n}"
   let counters ← IO.mkRef (0, 0)
   goImpl (runOneRandom counters T) argv false false
 
@@ -182,7 +193,11 @@ def goHybrid (T : Property) (rule : SwitchRule) (argv : Array String) (truncate 
     | .window level confidence => s!"fuzzing once finds level off (φ={level}, c={confidence})"
     | .fixed tests => s!"fuzzing after {tests} tests"}"
   let counters ← IO.mkRef (0, 0)
-  let gen ← IO.mkRef (← SplitMix.newIO)
+  let gen ← IO.mkRef (← match seedFlag? argv with
+    | some n => do
+      IO.println s!"[basalt] random rounds seeded with {n}"
+      pure (SplitMix.ofSeed n.toUInt64)
+    | none => SplitMix.newIO)
   let artifactPrefix := (strFlag? argv "-artifact_prefix=").getD ""
   let (tag, tests, a, b) := rule.encode
   hybridConfigImpl (runOneRecorded counters (T RecordGen) gen artifactPrefix) tag tests a b
