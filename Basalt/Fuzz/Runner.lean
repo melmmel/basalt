@@ -161,13 +161,27 @@ as `SwitchRule.encode` gives it, and `budget` the `-runs` bound (`0`: none). -/
 opaque hybridConfigImpl (runRandom : ByteArray → IO UInt8) (rule : UInt8) (tests : UInt64)
     (a b : Float) (budget : UInt64) : IO Unit
 
+/-- The PRNG state the running random-round test of a hybrid campaign started from, and `none`
+between such tests: a harness that records it can run that test again with `runRecord`, even after a
+crash or a time-out, which leave no saved input. -/
+initialize randomRoundState : IO.Ref (Option SplitMix) ← IO.mkRef none
+
+/-- `runRecord` as an `IO` step, so the test runs between the `randomRoundState` updates around it:
+`noinline` keeps the compiler from computing the pure result before or after them. -/
+@[noinline] def runRecordNow (T : PropM RecordGen Unit) (g : SplitMix) :
+    IO (TestOutcome × ByteArray × SplitMix) :=
+  pure (runRecord T g)
+
 /-- One random test, for a random round (`tally`): libFuzzer's buffer is ignored, the run is drawn at
 `RecordGen` from `gen`, and its recorded bytes go to the bridge. A failure is reported and its bytes
 saved under `artifactPrefix` — a `FuzzGen` input, so `replay` reproduces it — and the bridge exits on
 the `1` it returns, without letting libFuzzer save the buffer, which is not this run's input. -/
 def runOneRecorded (counters : IO.Ref (Nat × Nat)) (T : PropM RecordGen Unit)
     (gen : IO.Ref SplitMix) (artifactPrefix : String) (_ : ByteArray) : IO UInt8 := do
-  let (outcome, bytes, g') := runRecord T (← gen.get)
+  let g ← gen.get
+  randomRoundState.set (some g)
+  let (outcome, bytes, g') ← runRecordNow T g
+  randomRoundState.set none
   gen.set g'
   hybridOfferImpl bytes
   tally counters outcome fun msg runs discards => do
